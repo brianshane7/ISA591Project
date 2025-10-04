@@ -2,7 +2,14 @@
 title: "Exploratory Data Analysis"
 author: "Brian Shane, Jackson Chlebowy"
 date: "2025-10-04"
-output: html_document
+output:
+  html_document:
+    toc: true                # enables a table of contents
+    toc_float: true          # makes the TOC float as you scroll
+    toc_depth: 3             # controls how many header levels appear
+    number_sections: true    # adds section numbering (1, 1.1, etc.)
+    theme: flatly            # optional: nice clean Bootstrap theme
+    highlight: tango         # syntax highlighting for code
 ---
 
 ```{r setup, include=FALSE,message=FALSE}
@@ -28,37 +35,247 @@ skim(df)
 ```
 
 # Data Visualization
+## Histograms
 ```{r}
 DataExplorer::plot_histogram(df,
                              ncol=3,
                              nrow=3)
+```
 
+## Boxplots
+```{r}
 DataExplorer::plot_boxplot(df,by = "loan_default",
                            ncol=3,
                            nrow=3)
 ```
+
+## Corrplot
+
 ```{r} 
-#correlation
 df_num = df %>% select(where(is.numeric))
 
 df_num_cor = cor(df_num, use = "pairwise.complete.obs")
 
 corrplot::corrplot(df_num_cor)
 ```
+Very few vars with strong corr. Can only include installment or loan amount (not both). Open accts and total accts are corelated, should only keep one or ther other. pub_rec and pub_rec_bankruptcies are also correlated. 1 should be used for modeling. mths_since_last_delinq and delinq_2 years are correlated, and only 1 should be kept for modeling. Fico ranges are somewhat correlated with interest rates.
+
 
 # Handling Missing Data
+## Chacking for missing data
 ```{r}
 plot_missing(df)
 ```
-```{r}
-#df$revol_util[is.na(df$revol_util)] <- mean(df$revol_util, na.rm = TRUE)
-#df$pub_rec_bankruptcies[is.na(df$pub_rec_bankruptcies)] <- mean(df$pub_rec_bankruptcies, na.rm = TRUE)
-#df$mort_acc[is.na(df$mort_acc)] <- mean(df$mort_acc, na.rm = TRUE)
-#df$mths_since_last_delinq[is.na(df$mths_since_last_delinq)] <- mean(df$mths_since_last_delinq, na.rm = TRUE)
-#plot_missing(df)
+4 columns with missing data
 
-#I imputed these in my practice version, not sure if you had something different in mind.
+mths_since_last_delinq would mean that individual has never been delinquent, n/as make sense
+
+### Is missingness an indicator?
+```{r}
+## names of cols w/missings
+miss_cols = names(which(colSums(is.na(df)) > 0))   # 4 cols with missings
+
+## Missingness flags
+df = df %>%
+  mutate(across(all_of(miss_cols), ~ as.integer(is.na(.x)), .names = "{.col}_NA"))
+
+## are N/As potentially more/less likely to default? (proportions)
+by_class = df %>%
+  mutate(loan_defualt = df$loan_default) %>%
+  group_by(loan_default) %>%
+  summarise(across(ends_with("_NA"), mean, na.rm = TRUE))
+print(by_class)  
+
+# drop non important flags
+df = df %>% select(-revol_util_NA, -pub_rec_bankruptcies_NA) 
+
 ```
+KEEP NA flag+impute mort_acc_NA and mths_since_last... (3% difference for mort_acc_NA, and NA mths likely indicates never delinquent). missingness is not important for the other 2 vars (little meaningful diff in proportions)
+
+for mths_since... keep flag, impute missing with credit age
+for mort_acc keep flag, impute median/mode
+
+
+### Imputing revol_util
+```{r}
+sum(is.na(df$revol_util))
+df$revol_util[is.na(df$revol_util)] <- mean(df$revol_util, na.rm = TRUE)
+sum(is.na(df$revol_util))
+```
+### Imputing + flagging pub_rec_bankruptcies
+```{r}
+sum(is.na(df$pub_rec_bankruptcies))
+df$pub_rec_bankruptcies[is.na(df$pub_rec_bankruptcies)] = 0
+sum(is.na(df$pub_rec_bankruptcies))
+
+
+df$any_bankruptcy = as.integer(df$pub_rec_bankruptcies > 0) ## bankruptcy flag
+
+#df$pub_rec_bankruptcies_cap2= pmin(df$pub_rec_bankruptcies, 2L) ## capping at 2 -- No need to cap, flagging any bankrupcty, and anything > 1 should be fine
+
+df$pub_rec_bankrupt_high = as.integer(df$pub_rec_bankruptcies > 1)
+```
+### Imputing mort_acc
+```{r}
+sum(is.na(df$mort_acc))
+
+# 0 is the mode, NA in mort_acc likely means no accounts
+df$mort_acc[is.na(df$mort_acc)] = 0  
+
+sum(is.na(df$mort_acc))
+```
+
+### Imputing mths_since_last_delinq
+Creating credit_age_months to impute n/a mths_since_last_delinq. This assumes N/A means never delinquent
+```{r}
+sum(is.na(df$mths_since_last_delinq))
+
+library(dplyr)
+library(zoo)        # as.yearmon
+library(lubridate)  # time_length, interval
+
+df = df %>%
+  mutate(
+    earliest_cr_date = as.Date(as.yearmon(earliest_cr_line, "%b-%Y")),  # dates in date format
+    issue_date       = as.Date(as.yearmon(issue_d,          "%b-%Y")),
+    
+    # months between (integer)
+    credit_age_months = floor(time_length(interval(earliest_cr_date, issue_date), "month")))
+
+# imputing the associated credit age for people with n/as
+df = df %>%
+  mutate(
+    mths_since_last_delinq = coalesce(mths_since_last_delinq, credit_age_months)
+  ) 
+
+# dropping prev date cols
+df = df %>% select(-issue_d, -earliest_cr_line) 
+
+sum(is.na(df$mths_since_last_delinq))
+
+```
+## Checking for blanks (' ')
+```{r}
+
+blank_counts = df %>%  
+  summarise(across(where(is.character), ~ sum(trimws(.x) == ""))) 
+
+blank_counts
+names(blank_counts)[as.integer(blank_counts[1, ]) > 0]  # EMP_title, emp_length, title, last_credit_pull_date
+
+```
+4 columns have blank ' ' values in them. These need to be addressed like N/As
+
+
+### simplifying and imputing emp_title
+parsing each persons emp_title for common words associated with career fields/titles
+```{r}
+
+library(dplyr)
+library(stringr)
+library(forcats)
+ 
+df = df %>% ## parsing emp_title to simplify titles -- then dropping title
+  mutate(
+    emp_title_clean = gsub("\\s+"," ", trimws(tolower(as.character(emp_title)))),
+    emp_title_clean = if_else(is.na(emp_title_clean) | emp_title_clean=="","missing_title", emp_title_clean),
+    
+    emp_occupation = case_when(
+      # Ownership / exec / PM first
+      str_detect(emp_title_clean, "owner|founder|proprietor|self\\b|owner\\s*operator") ~ "owner_self",
+      str_detect(emp_title_clean, "\\b(ceo|cfo|coo|cto|cio|cmo|president|vice president|v\\.?p\\.?|svp|evp|director)\\b") ~ "executive",
+      str_detect(emp_title_clean, "project\\s*manager|program\\s*manager|project\\s*coord|\\bpm\\b") ~ "project_mgmt",
+      
+      # generic management (put BEFORE sales/admin so plain "manager" isn't lost)
+      str_detect(emp_title_clean, "\\b(manager|mgr|supervisor|lead|head)\\b|general\\s*manager") ~ "management",
+      
+      # Tech/engineering/trades
+      str_detect(emp_title_clean, "engineer|developer|software|programmer|coder|data\\s*analyst|network|systems?|\\bit\\b|devops|sysadmin|security\\s*analyst") ~ "it_engineering",
+      str_detect(emp_title_clean, "technician|\\btech\\b|mechanic|electrician|plumber|welder|hvac|lineman|maintenance|machinist|millwright|fabricator") ~ "skilled_trade",
+      
+      # Transport / logistics
+      str_detect(emp_title_clean, "driver|truck|cdl|delivery|courier|rideshare|uber|lyft|shipping|receiving|dispatcher\\b|logistics|warehouse|forklift|supply\\s*chain") ~ "transport_logistics",
+      
+      # Finance / banking / insurance
+      str_detect(emp_title_clean, "accountant|\\bcpa\\b|bookkeep|auditor|controller|financial\\s*(analyst|advisor|planner)|underwriter|loan\\s*officer|mortgage|bank(?!ruptcy)|collections?|treasurer|actuary|insurance") ~ "finance_banking",
+      
+      # Sales / retail / customer support
+      str_detect(emp_title_clean, "\\bsales\\b|account\\s*(exec|manager)|representative|\\brep\\b|retail|customer\\s*service|call\\s*center|cashier|store\\s*(mgr|manager|associate)|merchandis|inside\\s*sales|outside\\s*sales") ~ "sales_retail_cs",
+      
+      # Education
+      str_detect(emp_title_clean, "teacher|professor|instructor|educator|substitute|principal|para(prof|\\s*pro)?|tutor") ~ "education",
+      
+      # Healthcare (added plain 'nurse' and 'nursing')
+      str_detect(emp_title_clean, "\\b(rn|registered\\s*nurse|lpn|lvn|cna)\\b|\\bnurse\\b|nursing|medical\\s*assistant|therapist|pharmac(ist|y)|radiolog|x[- ]?ray|sonograph|ultrasound|mammograph|surg(ery|eon)|hospital|clinic|health\\s*care|healthcare|dental|hygienist") ~ "healthcare",
+      
+      # Legal
+      str_detect(emp_title_clean, "attorney|lawyer|paralegal|legal\\s*assistant|counsel") ~ "legal",
+      
+      # Law / security
+      str_detect(emp_title_clean, "police|detective|deputy|state\\s*trooper|sheriff|correction(s|al)?\\s*(officer)?|probation\\s*officer|parole\\s*officer|security\\s*(officer|guard)|fire(fighter|man)|\\bems\\b|911\\s*(dispatcher|operator)") ~ "law_security",
+      
+      # Military 
+      str_detect(emp_title_clean, "\\b(army|navy|air\\s*force|marine\\b|marines|coast\\s*guard|national\\s*guard|usaf|usmc|usn|usa|uscg|sgt\\b|sergeant|corporal|private|specialist|petty\\s*officer|airman|infantry|artillery)\\b") ~ "military",
+      
+      # Construction / real estate
+      str_detect(emp_title_clean, "construction|contractor|carpenter|roofer|painter|glazier|laborer|estimator|property\\s*manager|realtor|real\\s*estate|leasing") ~ "construction_realestate",
+      
+      # Hospitality / food
+      str_detect(emp_title_clean, "cook|chef|server|waiter|waitress|bartend|barista|dishwash|housekeep|custodial|janitor|hotel|hospitality|front\\s*desk|concierge") ~ "hospitality",
+      
+      # Creative / media
+      str_detect(emp_title_clean, "designer|artist|photograph|videograph|editor|writer|copywriter|journalist|social\\s*media|marketing|graphic|media|producer|musician|actor") ~ "creative_media",
+      
+      # Fallbacks
+      emp_title_clean == "missing_title" ~ "missing_title",
+      TRUE ~ "other_title"
+    )
+  )
+```
+In this code, we parse emp_title for common words related to careers/jobs to give each person a emp_occupation which can more easily provide info for our models
+
+
+#### Is it  meaningful? 
+```{r}
+df %>%
+       group_by(emp_occupation) %>%
+       summarise(n = n(),
+       default_rate = mean(loan_default == 'Yes', na.rm = TRUE)) %>%
+       arrange(desc(n)) %>%
+       slice_head(n = 12)
+
+# dropping original emp_title
+df = df %>% select(-emp_title, -emp_title_clean)
+
+table(df$emp_occupation)
+```
+it is yes, diff default rates by occupation potentially suggest higher/lower chance of default
+by occupation
+
+### Imputing Blanks in emp_length and releveling
+replacing n/as and blanks with "unknown"
+```{r}
+df = df %>%
+  mutate(emp_length = if_else(is.na(emp_length) | emp_length=="", "unknown", emp_length),
+         emp_length = factor(emp_length,
+                      levels = c("< 1 year","1 year","2 years","3 years","4 years","5 years",
+                      "6 years","7 years","8 years","9 years","10+ years","unknown"))
+) 
+
+table(df$emp_length)
+
+```
+### Dropping blanks in last_credit_pull_d
+12 blanks in this column. Not worth imputing so dropping them
+```{r}
+## changing data type so blanks become n/a
+df = df %>% mutate(last_credit_pull_d = as.Date(as.yearmon(last_credit_pull_d, "%b-%Y")) )
+
+## filtering out all last_credit_pull's that are n/a
+df = df %>% filter(!is.na(last_credit_pull_d))  
+
+```
+
 
 # Outler/Anomaly Dectection
 ```{r}
@@ -70,24 +287,395 @@ outlier_counts = sapply(df_num, function(x) {
   sum(x < lower | x > upper, na.rm = TRUE)
 })
 
-outlier_counts
+sort(outlier_counts, decreasing = TRUE)  
 ```
-# Data Transformation
+all outliers by the IQR rule (idk if this is helpful, dont always need to handle outliers)
+
+***COLUMNS TO BE AWARE OF: delinq_2yrs, pub_rec, pub_rec_bankrupcies, inq_last_6mths, revol_bal, annual_inc, fico_range, installment, open_acc
+
+don't have to cap/transform all or any, but should be aware of 
 
 
+# Data Transformation -- Capping/Binning variables and handling extreme outliers
+## Capping pub_rec
+```{r}
+quantile(df$pub_rec, 0.99, na.rm = TRUE)
+table(df$pub_rec)
 
+# capping at 5, 99% of data falls inside 0-2 (highest obs 86)
+df$pub_rec_cap5 = pmin(df$pub_rec, 5)
+
+# flagging pub_rec's > 5
+df$pub_rec_high = as.integer(df$pub_rec > 5)
+
+table(df$pub_rec_cap5)
+```
+## Capping mort_acc
+```{r} 
+quantile(df$mort_acc, 0.99, na.rm = TRUE)
+table(df$mort_acc)
+
+## 99% of data 0-9, capping at 9
+df$mort_acc_cap9 = pmin(df$mort_acc, 9) 
+
+# flagging > 9
+df$mort_acc_high = as.integer(df$mort_acc > 9)
+
+# Removing original col
+df = df %>% select(-mort_acc)
+
+table(df$mort_acc_cap9)
+```
+## Capping dti + removing extreme outlier (300% dti?)
+```{r}
+# filtering out dti > 150 (1 row, person has 300% dti. Extreme outlier)
+df = df %>%
+  filter(dti <= 150 | is.na(dti)) 
+
+## 99.5% of data <= 38.13% -- cap at 40 for round number, 99% at 36%, flag higher than 35
+quantile(df$dti, 0.995, na.rm = TRUE)
+hist(df$dti) 
+
+
+# Capping at 40
+df$dti_cap40 = pmin(df$dti, 40.00)
+
+## flagging at 35, not sure what a practical high risk threshold would be 
+df$dti_high = as.integer(df$dti > 35.00)
+
+## much cleaner now
+hist(df$dti_cap40) 
+```
+## Capping + binning open_acct
+```{r}
+quantile(df$open_acc, 0.995, na.rm = TRUE) ## 99.5% of data <= 30 accounts
+hist(df$open_acc)
+
+# flagging high # of open accts
+df$open_acc_high = as.integer(df$open_acc >= 26) # flagging 26 to be more strict
+ 
+## binning into groups of 5
+df = df %>%
+  mutate(
+    open_acc_bin = cut(
+      open_acc,
+      breaks = c(-Inf, 5, 10, 15, 20, 25, 30, Inf),
+      labels = c("≤5","6–10","11–15","16–20","21–25","26–30",">30"),
+      right = TRUE
+    ))
+
+# capping at 30. test vs binned during feature selection
+df$open_acc_cap30 = pmin(df$open_acc, 30)
+
+hist(df$open_acc_cap30)
+table(df$open_acc_bin)
+
+```
+Did both capping and binning to determing which is more meaningful later for modeling
+
+## Capping revol_util + handling outliers
+```{r}
+## dropping the one person that had 800%+ revol util, has to be bad data
+df = df %>% filter(is.na(revol_util) | revol_util <= 800)
+
+## 99.5% of data <= 99.3 -- cap at 100 for round number
+#quantile(df$revol_util, 0.995, na.rm = TRUE) 
+
+# flagging 100+ revol_util
+df$revol_util_high = as.integer(df$revol_util >= 100.0) 
+
+#capping at 100
+#df$revol_util_cap100 = pmin(df$revol_util, 100.0)
+
+```
+opting not to cap at this time, IQR rule found very few outliers for this var
+
+
+## Capping revol_bal
+```{r}
+## 99.5% of data <= $119452 -- flag at $125,000, cap at 250000 (99.9%)
+# tons of obs in the 125k-250k range
+quantile(df$revol_bal, 0.995, na.rm = TRUE)
+hist(df$revol_bal)
+
+## flagging "high" revol_bal
+df$revol_bal_high125 = as.integer(df$revol_bal >= 125000)
+
+# Capping at 250k
+df$revol_bal_cap250k = pmin(df$revol_bal, 250000)
+
+hist(df$revol_bal_cap250k)
+```
+## Capping acct_now_delinq -- binary 0/1 if acct is delinq
+```{r}
+# 0 if none (236782), 1 if any acc (very few with any, even fewer outside of 1)
+df$acc_now_delinq = pmin(df$acc_now_delinq, 1) 
+
+table(df$acc_now_delinq)
+
+```
+## Capping Delinq_2yrs
+```{r}
+# 99.5% of data <= 5
+quantile(df$delinq_2yrs, 0.995, na.rm = TRUE)  
+table(df$delinq_2yrs)
+
+# Flagging at >= 3, not many outside of 2 ~ 5k-6k >= 3
+df$delinq_2yrs_high = as.integer(df$delinq_2yrs >= 3) # > ~3000 people with 3
+df$delinq_2yrs_cap5 = pmin(df$delinq_2yrs, 5)
+
+table(df$delinq_2yrs_cap5)
+
+```
+## Binning and capping total_acct
+```{r}
+## 95% of data <= 45 accounts, 99.5 = 63 (cap at 60)
+quantile(df$total_acc, 0.95, na.rm = TRUE) 
+hist(df$total_acc)
+
+# flagging 45+ accounts open
+df$total_acc_high = as.integer(df$total_acc >= 45) 
+
+# binning into groups of 10
+df = df %>%
+  mutate(
+    total_acc_bin = cut(
+      total_acc,
+      breaks = c(-Inf, 10, 20, 30, 40, 50, 60, Inf),
+      labels = c("≤10","11-20","21-30","31-40","41-50","51-60",">60"),
+      right = TRUE,
+      include_lowest = TRUE
+    ))
+
+
+df$total_acc_cap60 = pmin(df$total_acc, 60)
+
+hist(df$total_acc_cap60)
+table(df$total_acc_bin)
+```
+compare performance with capped60 var
 
 # Dimension Reduction
-
-
-
-# Encoding Categorical Variables
+## Lumping Purpose
 ```{r}
-#df$pub_rec_bankruptcies <- as.factor(df$pub_rec_bankruptcies)
-#df$pub_rec_bankruptcies_cat <- fct_collapse(df$pub_rec_bankruptcies, None = "0",
-#"1" = "1", "2" = "2", "3+" = c("3","4","5","6","7","8"))
-#table(df$pub_rec_bankruptcies_cat)
+## lumping purpose down to the top 5, all others "Other"
+df$purpose = fct_lump_n(df$purpose, n = 5, other_level = "Other")
 
-#did this to better organize bankruptcies
+table(df$purpose)
+
+## collapsing the duplicate other cols together
+df$purpose = fct_collapse(df$purpose, Other = c("Other","other")) |> fct_drop()
+
+
+table(df$purpose)
+```
+## Lumping emp_occupation (formerly emp_title)
+```{r}
+# lumping down to top 10, saving others as "other_title"
+df$emp_occupation = fct_lump_n(df$emp_occupation, n = 10, other_level = "other_title")
+
+table(df$emp_occupation)
+
+```
+Not sure if this will end up being predictive of default
+
+## Var Datatypes
+Ensuring var datatypes are correct and how we would like them prior to feature selection
+```{r}
+
+#str(df)
+
+df = df %>%
+  mutate(
+    loan_default = factor(loan_default, levels = c("No","Yes")), ## yes/no levels
+    term = as.integer( str_extract( trimws(term), "\\d+" ) ), ## num of months rather than "36 Months"
+    grade = factor(grade, levels = c('A', 'B', 'C', 'D', 'E', 'F', 'G')), ##
+    sub_grade = factor(sub_grade, levels = as.vector(outer(c("A","B","C","D","E","F","G"), 1:5, paste0)) 
+    ),
+    home_ownership = as.factor(home_ownership),
+    verification_status = as.factor(verification_status),
+    initial_list_status = as.factor(initial_list_status),
+    application_type = as.factor(application_type),
+    debt_settlement_flag = as.factor(debt_settlement_flag),
+    emp_occupation = as.factor(emp_occupation)
+  )
+
+str(df)
+
+```
+## Dropping redundant vars
+```{r}
+df = df %>%
+  select(-title, -address, -earliest_cr_date, -pub_rec, -open_acc, -revol_bal, -delinq_2yrs, -total_acc, -debt_settlement_flag, -hardship_flag)
+
+```
+These are vars that are either not important to prediction (title, address) or are now redundant because of our capped or binned vars. (i believe) Debt settlement flag is leakage so i am removing it aswell. Hardship flag had all N so it was not useful.
+
+
+## Feature Selection: Lasso Ridge Regression
+LASSO Logistic Regression for feature selection -- Reduces least meaningful vars to 0 (can be dropped)
+```{r}
+library(glmnet)
+## x = df with all numeric data, dummy encodes any factors for glmnet
+X = model.matrix(loan_default ~ . , data = df)[, -1] 
+
+## y = targert/loan_default as a binary. Yes = 1, no = 0
+y = ifelse(df$loan_default =="Yes", 1,0 ) 
+
+set.seed(123)
+cvfit = cv.glmnet(X, y, family = "binomial", alpha = 1)
+
+  # Choose lambda (amount of shrinkage)
+lambda = cvfit$lambda.1se  # simpler model
+a= coef(cvfit, s = lambda) 
+
+lambda2 = cvfit$lambda.min  # absolute lowest cross validation error
+b = coef(cvfit, s = lambda2) 
+
+print(a, digits =5)
+```
+```{r}
+print(b, digits = 5)
+```
+
+FROM WHAT IVE SEEN ONLINE, .min can be more susceptible to over fitting.
+I WILL USE THE .1se TO GUIDE VAR SELECTION, INCLUDING STRONGEST VARS FROM .min IF EXCLUDED BY .1se
+
+### Dropping vars based on glmnet
+glmnet reduces least important vars to 0/., these can be dropped and are not important for predicting our target (loan_default)
+```{r}
+df = df %>% select(-pub_rec_bankruptcies, -pub_rec_bankrupt_high, -mort_acc_high, -open_acc_high, -total_acc_high, -sub_grade)
+```
+leaving out loan_amnt so i can use it for feature creation. will drop after. Getting rid of subgrade because there are so many levels. Grade should suffice
+
+# Dummy Encoding Categorical Variables
+dummy encoding all categorical vars, keeping all levels of each var. 
+```{r}
+
+target = "loan_default"
+
+# names of categorical cols
+cat_cols = setdiff(names(df)[sapply(df, is.factor)], target)
+
+df[cat_cols] = lapply(df[cat_cols], function(x) factor(x, ordered = FALSE))
+
+# Force identity contrast matrices (no reference level)
+dummies = model.matrix(
+  ~ . - 1,
+  data = df[cat_cols],
+  contrasts.arg = lapply(df[cat_cols], function(x)
+    contrasts(x, contrasts = FALSE))
+)
+
+# Merge with numeric + target vars
+df_dummies = cbind(
+  df,
+  as.data.frame(dummies)
+) 
 ```
 # Feature Creation
+## PTI payment-to-income ratio
+```{r}
+## dropping 1 row, where annual income is 0. Does this person add meaningfulness to the data?
+df_dummies = df_dummies %>% filter(is.na(annual_inc) | annual_inc > 0) 
+
+
+df_dummies$pti = df_dummies$installment / (df_dummies$annual_inc / 12)
+
+```
+
+## Avg_fico
+```{r}
+df_dummies$fico_avg = (df_dummies$fico_range_high + df_dummies$fico_range_low)/2 
+
+df_dummies = df_dummies %>% select(-fico_range_low, -fico_range_high)
+
+```
+
+## Loan_to_income_ratio + capping
+capping this to ensure large numbers to skew predictability
+```{r}
+
+df_dummies$loan_to_income_ratio = df$loan_amnt/df$annual_inc
+
+## 99.5% of data <= .49 -- flag at .50
+quantile(df_dummies$loan_to_income_ratio, 0.995, na.rm = TRUE) 
+
+## flagging > .5 as high
+df_dummies$loan_to_income_high = as.integer(df_dummies$loan_to_income_ratio >= .50) 
+
+## flagging > 1.0 as extremely high (this might not be necessary, only a handful of Extremes )
+df_dummies$loan_to_income_extreme = as.integer(df_dummies$loan_to_income_ratio >= 1.0) 
+
+## capping at 1.0
+df_dummies$loan_to_income_ratio_cap = pmin(df_dummies$loan_to_income_ratio, 1.0) 
+
+# removing original var
+df_dummies = df_dummies %>% select(-loan_to_income_ratio, -loan_amnt) 
+
+```
+
+## dti*fico_avg
+```{r}
+df_dummies$dti_x_fico_avg = df_dummies$dti * df_dummies$fico_avg
+```
+
+## int_rate_x_grade
+```{r}
+#df_dummies$int_rate_x_grade = df_dummies$int_rate*df_dummies$grade
+
+```
+not a helpful var, led to NAs
+## Credit_inq_rate, long_credit_history flag
+```{r}
+df_dummies <- df_dummies %>%
+  mutate(
+    credit_inq_rate = inq_last_6mths / (credit_age_months / 6),  # inquiries per 6mo segment
+    long_credit_history = ifelse(credit_age_months > 180, 1, 0)  # 15+ years
+  )
+```
+
+## dti_to_credit_age_ratio
+```{r}
+df_dummies$dti_to_credit_age_ratio = df_dummies$dti/(df_dummies$credit_age_months/12)
+
+```
+
+### Running another Lasso Ridge Regression to see if new vars are worth keeping
+```{r}
+library(glmnet)
+## x = df with all numeric data, dummy encodes any factors for glmnet
+X1 <- df_dummies %>%
+  select(-loan_default) %>%     # drop target
+  select(where(is.numeric)) %>% # keep numeric-only predictors
+  as.matrix()
+
+## y = targert/loan_default as a binary. Yes = 1, no = 0
+y1 = ifelse(df_dummies$loan_default =="Yes", 1,0 ) 
+
+set.seed(123)
+cvfit1 = cv.glmnet(X1, y1, family = "binomial", alpha = 1)
+
+  # Choose lambda (amount of shrinkage)
+lambda1 = cvfit1$lambda.1se  # simpler model
+c= coef(cvfit1, s = lambda1) 
+
+print(c, digits = 5)
+
+```
+```{r}
+lambda2 = cvfit1$lambda.min  # simpler model
+d= coef(cvfit1, s = lambda2) 
+
+print(d, digits = 5)
+```
+### Dropping unimportant new features
+```{r}
+df_dummies = df_dummies %>% select(-pti, -open_acc_bin, -`open_acc_bin≤5`, -`open_acc_bin6–10`, -`open_acc_bin11–15`,-`open_acc_bin16–20`, -`open_acc_bin21–25`, -`open_acc_bin26–30`, `open_acc_bin>30`, dti_x_fico_avg)
+```
+opting to keep all new vars except pti and dti_x_fico_avf. Dropping open_acc in favor of keeping total acct and its dummies
+
+# Saving as RDS
+```{r}
+saveRDS(df_dummies, file = "group11a-Chlebowy-Shane_train.rds")
+```
