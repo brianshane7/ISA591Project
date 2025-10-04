@@ -1,0 +1,93 @@
+---
+title: "Exploratory Data Analysis"
+author: "Brian Shane, Jackson Chlebowy"
+date: "2025-10-04"
+output: html_document
+---
+
+```{r setup, include=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE,warning=FALSE)
+knitr::opts_chunk$set(fig.width=8, fig.height=6)
+
+if(require(pacman)==0)
+   {install.packages("pacman")}
+pacman::p_load(devtools,caret,cluster,dplyr,fastDummies,leaps,pacman,tidyverse,skimr,fastDummies,GGally,DataExplorer,ggrepel,ggthemes,dslabs,scatterplot3d,scales,forecast,knitr,ROCR,gains)
+
+if (!require(mlba)) {
+  library(devtools)
+  install_github("gedeck/mlba/mlba", force=FALSE)
+}
+pacman::p_load(mlba,tidyverse)
+```
+
+# Data Overview and Summary Statistics
+
+```{r}
+df <- read.csv('train.csv')
+skim(df)
+```
+
+# Data Visualization
+```{r}
+DataExplorer::plot_histogram(df,
+                             ncol=3,
+                             nrow=3)
+
+DataExplorer::plot_boxplot(df,by = "loan_default",
+                           ncol=3,
+                           nrow=3)
+```
+```{r} 
+#correlation
+df_num = df %>% select(where(is.numeric))
+
+df_num_cor = cor(df_num, use = "pairwise.complete.obs")
+
+corrplot::corrplot(df_num_cor)
+```
+
+# Handling Missing Data
+```{r}
+plot_missing(df)
+```
+```{r}
+#df$revol_util[is.na(df$revol_util)] <- mean(df$revol_util, na.rm = TRUE)
+#df$pub_rec_bankruptcies[is.na(df$pub_rec_bankruptcies)] <- mean(df$pub_rec_bankruptcies, na.rm = TRUE)
+#df$mort_acc[is.na(df$mort_acc)] <- mean(df$mort_acc, na.rm = TRUE)
+#df$mths_since_last_delinq[is.na(df$mths_since_last_delinq)] <- mean(df$mths_since_last_delinq, na.rm = TRUE)
+#plot_missing(df)
+
+#I imputed these in my practice version, not sure if you had something different in mind.
+```
+
+# Outler/Anomaly Dectection
+```{r}
+outlier_counts = sapply(df_num, function(x) {
+  q = quantile(x, c(0.25, 0.75), na.rm = TRUE)
+  iqr = q[2] - q[1]
+  lower = q[1] - 1.5 * iqr
+  upper = q[2] + 1.5 * iqr
+  sum(x < lower | x > upper, na.rm = TRUE)
+})
+
+outlier_counts
+```
+# Data Transformation
+
+
+
+
+# Dimension Reduction
+
+
+
+# Encoding Categorical Variables
+```{r}
+#df$pub_rec_bankruptcies <- as.factor(df$pub_rec_bankruptcies)
+#df$pub_rec_bankruptcies_cat <- fct_collapse(df$pub_rec_bankruptcies, None = "0",
+#"1" = "1", "2" = "2", "3+" = c("3","4","5","6","7","8"))
+#table(df$pub_rec_bankruptcies_cat)
+
+#did this to better organize bankruptcies
+```
+# Feature Creation
